@@ -338,6 +338,8 @@ with sync_playwright() as p:
     page.wait_for_selector(".vs-panel")
     check("보기 설정 열림 · 기본 프리셋 4종", page.locator(".preset").count() == 4)
     page.locator(".preset[data-preset='delivery']").click()
+    # 프리셋의 정렬은 useEffect에서 반영되므로 변경된 행이 렌더될 때까지 기다린다.
+    page.wait_for_function("() => document.querySelector('.result-table tbody tr .sticky-col .name')?.textContent === '업체 D'")
     first = page.locator(".result-table tbody tr").first.locator(".sticky-col .name").inner_text()
     heads = page.locator(".result-table thead th").all_inner_texts()
     check("프리셋 '납기·공급 리스크': 납기 낮은 순 정렬", first == "업체 D", first)

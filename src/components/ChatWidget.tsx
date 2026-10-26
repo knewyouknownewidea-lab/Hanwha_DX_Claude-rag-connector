@@ -9,6 +9,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { Chip } from "./ui";
 import { templateLabel } from "../templates/registry";
 import { readStore, writeStore } from "../platform/storage";
+import type { ChatMode, RagModel } from "../ai/rag";
 
 /** 'AI와 대화'임이 바로 보이는 아이콘: 말풍선 + 반짝임 */
 export function AiChatIcon({ size = 22 }: { size?: number }) {
@@ -89,12 +90,13 @@ function useNarrow() {
 function EngineBadge({ engine }: { engine: string }) {
   if (engine === "rule") return <span className="engine engine-rule">규칙 기반 데모 응답</span>;
   if (engine === "llm") return <span className="engine engine-llm">LLM 해석 · 계산은 코드</span>;
+  if (engine === "rag") return <span className="engine engine-rag">구매 DB RAG</span>;
   return null;
 }
 
 function Assistant({ m }: { m: Extract<ChatMessage, { role: "assistant" }> }) {
   const { state } = useStore();
-  const { ask, choose } = useAgent();
+  const { ask, choose, chatMode } = useAgent();
   const result = m.resultId ? state.results[m.resultId] : undefined;
   const showing = result && state.view.resultId === result.id;
   return (
@@ -102,11 +104,30 @@ function Assistant({ m }: { m: Extract<ChatMessage, { role: "assistant" }> }) {
       <div className="msg-avatar" aria-hidden>
         <AiChatIcon size={18} />
       </div>
-      <div className="msg-body">
+      <div className={`msg-body ${m.engine === "rag" ? "msg-body-rag" : ""}`}>
         <EngineBadge engine={m.engine} />
+        {m.ragModel && <span className="rag-model-name">모델 · {m.ragModel}</span>}
         {m.text.map((t, i) => (
           <p key={i}>{t}</p>
         ))}
+        {!!m.ragSources?.length && (
+          <details className="rag-sources">
+            <summary>답변 출처 {m.ragSources.length}건</summary>
+            <ul>
+              {m.ragSources.map((source, i) => (
+                <li key={`${source.evidence_id}-${i}`}>
+                  <strong>[{source.evidence_id}]</strong>
+                  <span>{source.source.source_refs.join(" · ")}</span>
+                  <small>{[
+                    typeof source.source.source_db === "string" ? `DB: ${source.source.source_db}` : "",
+                    source.parent_document_id ? `문서: ${source.parent_document_id}` : "",
+                    source.chunk_id ? `조각: ${source.chunk_id}` : "",
+                  ].filter(Boolean).join(" · ")}</small>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {result && (
           <>
             <p className="msg-sources">
@@ -137,7 +158,7 @@ function Assistant({ m }: { m: Extract<ChatMessage, { role: "assistant" }> }) {
             </div>
           </>
         )}
-        {m.options && (
+        {m.options && chatMode === "analysis" && (
           <div className="opt-chips" role="group" aria-label="선택지">
             {m.options.map((o) => (
               <button type="button" key={o.id} className={`opt-chip ${m.answered === o.label ? "is-chosen" : ""}`} onClick={() => ask(o.label, { answeringId: m.id })} disabled={state.busy || !!m.answered}>
@@ -147,7 +168,7 @@ function Assistant({ m }: { m: Extract<ChatMessage, { role: "assistant" }> }) {
             ))}
           </div>
         )}
-        {m.suggestions && m.id !== "welcome" && (
+        {m.suggestions && m.id !== "welcome" && chatMode === "analysis" && (
           <div className="suggest" role="group" aria-label="질문 예시">
             {m.suggestions.map((s) => (
               <button type="button" key={s} className="suggest-chip" onClick={() => ask(s)} disabled={state.busy}>
@@ -164,7 +185,9 @@ function Assistant({ m }: { m: Extract<ChatMessage, { role: "assistant" }> }) {
 
 function ChatBody({ inputRef }: { inputRef: RefObject<HTMLTextAreaElement | null> }) {
   const { state, derived, dispatch } = useStore();
-  const { ask } = useAgent();
+  const { ask, chatMode, setChatMode, ragModel, setRagModel, ragConfig, ragChecking, ragConfigError, refreshRagConfig } = useAgent();
+  const isRag = chatMode === "rag";
+  const canSend = !state.busy && (!isRag || (!!ragConfig?.enabled && !!ragModel && !ragChecking));
   const [text, setText] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -174,16 +197,17 @@ function ChatBody({ inputRef }: { inputRef: RefObject<HTMLTextAreaElement | null
   }, [state.messages.length, state.busy]);
 
   const send = () => {
-    if (!text.trim() || state.busy) return;
+    if (!text.trim() || !canSend) return;
     const q = text;
     setText("");
-    ask(q);
+    ask(q, { mode: chatMode });
   };
   const item = state.selection.itemCode ? derived.itemsByCode.get(state.selection.itemCode) : null;
   const sup = state.selection.supplierId ? derived.suppliersById.get(state.selection.supplierId) : null;
 
   // 추천 질문: 기본 4개 + 관심 협력사·부품을 넣은 질문
   const suggestions = useMemo(() => {
+    if (isRag) return ["발주 1101 수량은?", "가상 A사 Q 점수", "베어링 완충 포장 민원 찾아줘"];
     const out: string[] = [];
     const fs = state.favorites.suppliers.map((id) => derived.suppliersById.get(id)?.name).filter(Boolean) as string[];
     const fi = state.favorites.items.map((c) => derived.itemsByCode.get(c)?.name).filter(Boolean) as string[];
@@ -191,19 +215,20 @@ function ChatBody({ inputRef }: { inputRef: RefObject<HTMLTextAreaElement | null
     if (fi[0]) out.push(`${fi[0]} 후보 업체 비교해 줘`);
     else if (fs[1]) out.push(`${fs[0]}랑 ${fs[1]} 비교해줘`);
     return [...out, ...SUGGESTED];
-  }, [state.favorites, derived]);
+  }, [state.favorites, derived, isRag]);
 
   const step = Math.min(state.progress, STEPS.length - 1);
   return (
     <>
-      <div className="chat-search">
+      {!isRag && <div className="chat-search">
         <KeywordSearch />
-      </div>
+      </div>}
       <div className="chat-list" ref={listRef} aria-live="polite">
-        {state.messages.map((m) =>
+        {isRag && <p className="rag-intro">별도 구매 DB의 협력사·부품·발주·납품·민원을 질문하세요. 답변과 원본 참조를 이 대화창에 표시합니다.</p>}
+        {state.messages.filter((m) => !isRag || m.id !== "welcome").map((m) =>
           m.role === "user" ? (
             <div className="msg msg-user" key={m.id}>
-              <p>{m.text}</p>
+              <p>{m.mode === "rag" && <span className="user-rag-label">구매 DB RAG</span>}{m.text}</p>
             </div>
           ) : (
             <Assistant key={m.id} m={m} />
@@ -221,23 +246,41 @@ function ChatBody({ inputRef }: { inputRef: RefObject<HTMLTextAreaElement | null
                 <i />
               </span>
               <span className="progress-step">
-                {STEPS[step]} <small>
+                {isRag ? "구매 DB 검색·답변 생성 중" : <>{STEPS[step]} <small>
                   ({step + 1}/{STEPS.length}단계)
-                </small>
+                </small></>}
               </span>
             </div>
           </div>
         )}
       </div>
       <div className="composer">
+        <div className="chat-mode-controls">
+          <label htmlFor="chat-answer-mode">질문 방식
+            <select id="chat-answer-mode" value={chatMode} disabled={state.busy} onChange={(e) => setChatMode(e.target.value as ChatMode)}>
+              <option value="analysis">웹 데이터 분석</option>
+              <option value="rag">구매 DB RAG</option>
+            </select>
+          </label>
+          {isRag && <label htmlFor="rag-model">답변 모델
+            <select id="rag-model" value={ragModel} disabled={state.busy || ragChecking || !ragConfig?.enabled} onChange={(e) => setRagModel(e.target.value as RagModel | "")}>
+              <option value="">모델 선택</option>
+              {(ragConfig?.models ?? []).map((model) => <option key={model} value={model}>{model}</option>)}
+            </select>
+          </label>}
+        </div>
+        {isRag && <div className="rag-connection" role="status">
+          <p>{ragChecking ? "RAG 연결 설정 확인 중…" : ragConfigError ? ragConfigError : !ragConfig?.enabled ? "RAG 서버 연결 설정이 필요합니다." : "별도 구매 DB 기준 · 화면의 선택·업로드 데이터는 적용되지 않습니다."}</p>
+          {!ragChecking && !ragConfig?.enabled && <button type="button" className="link-btn" onClick={refreshRagConfig}>다시 확인</button>}
+        </div>}
         <div className="suggest-row" role="group" aria-label="추천 질문">
           {suggestions.map((s) => (
-            <button type="button" key={s} className="suggest-chip" onClick={() => ask(s)} disabled={state.busy}>
+            <button type="button" key={s} className="suggest-chip" onClick={() => ask(s, { mode: chatMode })} disabled={!canSend}>
               {s}
             </button>
           ))}
         </div>
-        <div className="ctx-chips" aria-label="질문 문맥">
+        {!isRag && <div className="ctx-chips" aria-label="질문 문맥">
           <span className="ctx-label">질문 대상</span>
           {item ? (
             <Chip tone="accent" onRemove={() => dispatch({ type: "clearSelection", what: "item" })}>
@@ -251,7 +294,7 @@ function ChatBody({ inputRef }: { inputRef: RefObject<HTMLTextAreaElement | null
               협력사 · {sup.name}
             </Chip>
           )}
-        </div>
+        </div>}
         <form
           className="composer-form"
           onSubmit={(e) => {
@@ -260,13 +303,14 @@ function ChatBody({ inputRef }: { inputRef: RefObject<HTMLTextAreaElement | null
           }}
         >
           <label htmlFor="chat-input" className="sr-only">
-            분석 질문
+            {isRag ? "구매 DB RAG 질문" : "분석 질문"}
           </label>
           <textarea
             id="chat-input"
             ref={inputRef}
             rows={2}
-            placeholder="분석할 내용을 질문하세요 · 예: 실린더 라이너 후보 업체를 비교해 줘"
+            placeholder={isRag ? "구매 DB 질문 · 예: 발주 1101 수량은?" : "분석할 내용을 질문하세요 · 예: 실린더 라이너 후보 업체를 비교해 줘"}
+            maxLength={isRag ? 1000 : undefined}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
@@ -276,11 +320,11 @@ function ChatBody({ inputRef }: { inputRef: RefObject<HTMLTextAreaElement | null
               }
             }}
           />
-          <button type="submit" className="send-btn" disabled={state.busy || !text.trim()} aria-label="질문 보내기" title="보내기 (Enter)">
+          <button type="submit" className="send-btn" disabled={!canSend || !text.trim()} aria-label="질문 보내기" title="보내기 (Enter)">
             <LuArrowUp aria-hidden />
           </button>
         </form>
-        <p className="composer-hint">Enter 보내기 · Shift+Enter 줄바꿈</p>
+        <p className="composer-hint">Enter 보내기 · Shift+Enter 줄바꿈{isRag ? " · 최대 1000자" : ""}</p>
       </div>
     </>
   );
@@ -289,6 +333,7 @@ function ChatBody({ inputRef }: { inputRef: RefObject<HTMLTextAreaElement | null
 // ── 떠 있는 창 ──
 export function ChatWidget() {
   const { state, dispatch } = useStore();
+  const { chatMode } = useAgent();
   const narrow = useNarrow();
   const [geo, setGeo] = useState<Geo>(() => (typeof window !== "undefined" ? loadGeo() : defaultGeo()));
   const [menu, setMenu] = useState(false);
@@ -478,7 +523,7 @@ export function ChatWidget() {
               </span>
               <div className="chat-title-text">
                 <strong>AI 분석 도우미</strong>
-                <span>{state.aiMode === "llm" ? "LLM 해석 모드" : "규칙 기반 데모 모드"} · 데이터로 계산</span>
+                <span>{chatMode === "rag" ? "구매 DB RAG · 답변과 출처" : `${state.aiMode === "llm" ? "LLM 해석 모드" : "규칙 기반 데모 모드"} · 데이터로 계산`}</span>
               </div>
             </div>
             <div className="chat-tools">

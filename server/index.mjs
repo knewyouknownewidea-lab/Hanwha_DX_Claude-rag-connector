@@ -3,8 +3,9 @@
 //   ANTHROPIC_API_KEY=... LLM_MODEL=claude-haiku-5-5 PORT=5173 node server/index.mjs
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRagHandler } from "./rag.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const dist = join(root, "dist");
@@ -47,32 +48,38 @@ async function interpret(prompt) {
   return (body.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
 }
 
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url || "/", `http://${req.headers.host}`);
-  try {
-    if (url.pathname === "/api/ai/status") return send(res, 200, { enabled: !!API_KEY, model: API_KEY ? MODEL : null });
-    if (url.pathname === "/api/ai/interpret" && req.method === "POST") {
-      if (!API_KEY) return send(res, 503, { error: "ANTHROPIC_API_KEY가 설정되지 않았습니다" });
-      const { prompt } = await readBody(req);
-      if (typeof prompt !== "string" || !prompt.trim() || prompt.length > MAX_PROMPT) return send(res, 400, { error: "prompt가 비었거나 너무 깁니다" });
-      return send(res, 200, { text: await interpret(prompt) });
-    }
-    let path = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, "");
-    if (!path || path.endsWith("/")) path += "index.html";
-    const file = join(dist, path);
-    if (!file.startsWith(dist)) return send(res, 403, { error: "forbidden" });
+export function createAppServer({ env = process.env, ragOptions } = {}) {
+  const handleRag = createRagHandler(env, ragOptions);
+  return createServer(async (req, res) => {
+    const url = new URL(req.url || "/", `http://${req.headers.host}`);
     try {
-      const data = await readFile(file);
-      return send(res, 200, data, TYPES[extname(file)] || "application/octet-stream");
-    } catch {
-      const html = await readFile(join(dist, "index.html"));
-      return send(res, 200, html, TYPES[".html"]);
+      if (await handleRag(req, res, url)) return;
+      if (url.pathname === "/api/ai/status") return send(res, 200, { enabled: !!API_KEY, model: API_KEY ? MODEL : null });
+      if (url.pathname === "/api/ai/interpret" && req.method === "POST") {
+        if (!API_KEY) return send(res, 503, { error: "ANTHROPIC_API_KEY가 설정되지 않았습니다" });
+        const { prompt } = await readBody(req);
+        if (typeof prompt !== "string" || !prompt.trim() || prompt.length > MAX_PROMPT) return send(res, 400, { error: "prompt가 비었거나 너무 깁니다" });
+        return send(res, 200, { text: await interpret(prompt) });
+      }
+      let path = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, "");
+      if (!path || path.endsWith("/")) path += "index.html";
+      const file = join(dist, path);
+      if (!file.startsWith(dist)) return send(res, 403, { error: "forbidden" });
+      try {
+        const data = await readFile(file);
+        return send(res, 200, data, TYPES[extname(file)] || "application/octet-stream");
+      } catch {
+        const html = await readFile(join(dist, "index.html"));
+        return send(res, 200, html, TYPES[".html"]);
+      }
+    } catch (e) {
+      return send(res, 500, { error: e instanceof Error ? e.message : String(e) });
     }
-  } catch (e) {
-    return send(res, 500, { error: e instanceof Error ? e.message : String(e) });
-  }
-});
+  });
+}
 
-server.listen(PORT, () => {
-  console.log(`[server] http://localhost:${PORT}  ·  LLM ${API_KEY ? `연결 (${MODEL})` : "미연결 → 규칙 기반 데모로 동작"}`);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  createAppServer().listen(PORT, () => {
+    console.log(`[server] http://localhost:${PORT}  ·  LLM ${API_KEY ? `연결 (${MODEL})` : "미연결 → 규칙 기반 데모로 동작"}`);
+  });
+}

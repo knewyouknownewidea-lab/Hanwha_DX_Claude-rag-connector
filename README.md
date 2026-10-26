@@ -4,7 +4,7 @@
 
 **로그인 → 데이터 관리(왼쪽)에서 찾기 → 행을 누르면 오른쪽에 상세 → 왼쪽 아래 'AI에게 질문하기' → 분석 결과(오른쪽)에서 형식·보기 설정 변경 → 엑셀로 내보내기**
 
-현재 버전: v0.3.2 (변경 내용은 `CHANGELOG.md`)
+현재 버전: v0.4.0 (변경 내용은 `CHANGELOG.md`)
 
 > 모든 업체명·품목·수치·시세·임금·경쟁사·기사는 시연용 가상 데이터(SAMPLE)이며 실제 자료가 아닙니다.
 
@@ -113,6 +113,20 @@ npm run build      # dist/index.html(한화엔진 표기), dist/artifact.html(�
 
 ## AI API 연결 방법
 
+### 구매 DB RAG 연결 (v0.4.0)
+
+기존 **AI에게 질문하기** 창의 **질문 방식 → 구매 DB RAG**를 선택하고 답변 모델을 고릅니다.
+질문은 웹 서버의 `/api/rag/jobs`를 거쳐 별도로 실행한 구매 RAG 게이트웨이에 전달되며,
+완료된 답변과 `[E1]` 출처·원본 DB 참조를 대화창에 표시합니다.
+서버 환경변수 `RAG_ORIGIN`(게이트웨이 주소)과 `RAG_GATEWAY_TOKEN`(32자 이상 비밀 토큰)을 설정해야 합니다.
+토큰과 내부 게이트웨이 주소는 브라우저에 보내지 않습니다.
+
+RAG는 별도 구매 DB 기준이며, 화면에서 선택한 `SUP-001`·품목 코드·업로드 데이터를 자동으로 사용하지 않습니다.
+**웹 데이터 분석** 모드는 기존 기능을 유지합니다. 자세한 실행 순서·설정·API 계약·테스트는 [docs/RAG.md](docs/RAG.md)를 확인하세요.
+`dist/index.html`을 파일로 열거나 정적 호스팅만 사용하는 경우에는 RAG 중계 서버를 실행할 수 없습니다.
+
+### 기존 질문 해석 LLM
+
 LLM은 **질문 해석에만** 쓰고, 수치 계산·업체 비교·근거 문장은 코드가 데이터로 만듭니다. LLM 응답은 목록에 있는 품목코드·업체ID만 남기도록 검증합니다.
 
 ```bash
@@ -171,6 +185,8 @@ ANTHROPIC_API_KEY=발급받은_키 LLM_MODEL=claude-haiku-5-5 npm start
 
 ```bash
 npm run test:logic                # 분석·결제 일정·시세·인건비·요약 지표·검증·xlsx 로직 (tests/logic-smoke.ts, tests/logic-v3.ts)
+npm run test:rag                  # 게이트웨이 중계·방문자·오류·클라이언트 회귀 테스트
+npm run test:e2e:rag              # 빌드 후 실행: 실제 웹 서버 + 모의 게이트웨이 브라우저 연결 테스트
 npm start & npm run test:e2e      # 브라우저 E2E (Python Playwright·openpyxl 필요)
 ```
 

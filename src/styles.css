@@ -656,6 +656,23 @@ th.sticky-col { z-index: 3; background: var(--surface-2); }
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
 .send-btn:disabled { background: var(--line-2); }
 .composer-hint { font-size: var(--fs-12); color: var(--muted); }
+.chat-mode-controls { display: flex; gap: 10px; align-items: end; }
+.chat-mode-controls label { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; font-size: var(--fs-12); color: var(--ink-2); }
+.chat-mode-controls select { width: 100%; }
+.rag-connection { display: flex; align-items: baseline; gap: 8px; font-size: var(--fs-12); color: var(--ink-2); }
+.rag-connection p { flex: 1; min-width: 0; }
+.rag-connection button { flex: none; font-size: var(--fs-12); }
+.rag-intro { font-size: var(--fs-13); color: var(--ink-2); }
+.engine-rag { background: var(--surface); color: var(--ink-2); border: 1px solid var(--line); }
+.rag-model-name { font-size: var(--fs-12); color: var(--ink-2); }
+.msg-body-rag > p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.rag-sources { font-size: var(--fs-12); overflow-wrap: anywhere; }
+.rag-sources summary { cursor: pointer; font-weight: 500; }
+.rag-sources ul { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 10px; }
+.rag-sources li { display: grid; gap: 3px; }
+.rag-sources small { font-size: var(--fs-12); color: var(--ink-2); }
+.user-rag-label { display: block; margin-bottom: 4px; font-size: var(--fs-12); font-weight: 500; }
+@media (max-width: 640px) { .chat-mode-controls select { min-height: 44px; font-size: var(--fs-14); } }
 
 /* ── 모달 ── */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(20, 21, 23, 0.42); display: grid; place-items: center; z-index: 60; padding: 16px; }

@@ -12,14 +12,15 @@ import { clone, DEFAULT_SETTINGS, normalizeSettings, type Preset, type ViewSetti
 import { readStore, userKey, writeStore } from "../platform/storage";
 import { idbDel, idbGet, idbSet } from "../platform/idb";
 import type { User } from "../platform/users";
+import type { ChatMode, RagSource } from "../ai/rag";
 
 export type ChatMessage =
-  | { id: string; role: "user"; text: string; at: string }
+  | { id: string; role: "user"; text: string; at: string; mode?: ChatMode }
   | {
       id: string;
       role: "assistant";
       at: string;
-      engine: Engine | "system";
+      engine: Engine | "system" | "rag";
       engineNote?: string;
       text: string[];
       resultId?: string;
@@ -29,6 +30,9 @@ export type ChatMessage =
       need?: PendingClarify["need"];
       answered?: string | null;
       suggestions?: string[];
+      ragSources?: RagSource[];
+      ragModel?: string;
+      ragStatus?: string;
     };
 
 /** 좁은 화면에서 보이는 영역: A = 데이터 관리, C = 분석 결과 */

@@ -5,13 +5,22 @@ import { detectProvider, type LLMProvider } from "../ai/llm";
 import { runAnalysis } from "../lib/analysis";
 import type { AnalysisResult, TemplateId } from "../lib/analysisTypes";
 import { uid, useStore } from "./store";
+import { askRag, getRagConfig, type ChatMode, type RagConfig, type RagModel } from "../ai/rag";
 
 interface AgentApi {
-  ask: (question: string, opts?: { answeringId?: string }) => Promise<void>;
+  ask: (question: string, opts?: { answeringId?: string; mode?: ChatMode }) => Promise<void>;
   choose: (resultId: string, template: TemplateId) => void;
   rerun: (result: AnalysisResult) => void;
   provider: LLMProvider | null;
   providerChecked: boolean;
+  chatMode: ChatMode;
+  setChatMode: (mode: ChatMode) => void;
+  ragModel: RagModel | "";
+  setRagModel: (model: RagModel | "") => void;
+  ragConfig: RagConfig | null;
+  ragChecking: boolean;
+  ragConfigError: string | null;
+  refreshRagConfig: () => void;
 }
 
 const Ctx = createContext<AgentApi | null>(null);
@@ -24,6 +33,50 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   ref.current = store;
   const [provider, setProvider] = useState<LLMProvider | null>(null);
   const [checked, setChecked] = useState(false);
+  const [chatMode, setChatMode] = useState<ChatMode>("analysis");
+  const [ragModel, setRagModel] = useState<RagModel | "">("");
+  const [ragConfig, setRagConfig] = useState<RagConfig | null>(null);
+  const [ragChecking, setRagChecking] = useState(false);
+  const [ragConfigError, setRagConfigError] = useState<string | null>(null);
+  const alive = useRef(true);
+  const submitting = useRef(false);
+  const ragRequest = useRef<AbortController | null>(null);
+  const configRequest = useRef<AbortController | null>(null);
+
+  const refreshRagConfig = useCallback(() => {
+    configRequest.current?.abort();
+    if (window.location.protocol === "file:") {
+      setRagConfigError("구매 DB RAG는 웹 서버를 통해 열어야 사용할 수 있습니다.");
+      return;
+    }
+    const controller = new AbortController();
+    configRequest.current = controller;
+    setRagChecking(true);
+    setRagConfigError(null);
+    const timer = setTimeout(() => controller.abort(), 8000);
+    getRagConfig(controller.signal).then((config) => {
+      if (!alive.current || configRequest.current !== controller) return;
+      setRagConfig(config);
+      setRagModel((current) => current && !config.models.includes(current) ? "" : current);
+    }).catch(() => {
+      if (!alive.current || configRequest.current !== controller) return;
+      setRagConfig(null);
+      setRagConfigError("RAG 연결 설정을 확인하지 못했습니다. 웹 서버 상태를 확인해 주세요.");
+    }).finally(() => {
+      clearTimeout(timer);
+      if (alive.current && configRequest.current === controller) setRagChecking(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    alive.current = true;
+    refreshRagConfig();
+    return () => {
+      alive.current = false;
+      configRequest.current?.abort();
+      ragRequest.current?.abort();
+    };
+  }, [refreshRagConfig]);
 
   useEffect(() => {
     let alive = true;
@@ -38,14 +91,36 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const ask = useCallback(
-    async (question: string, opts?: { answeringId?: string }) => {
+    async (question: string, opts?: { answeringId?: string; mode?: ChatMode }) => {
       const { state, dispatch, derived } = ref.current;
       const q = question.trim();
-      if (!q || state.busy) return;
+      // 기존 평가 카드·선택 정보의 분석 버튼은 계속 웹 데이터 분석을 사용한다.
+      const mode = opts?.mode ?? "analysis";
+      if (!q || state.busy || submitting.current) return;
+      if (mode === "rag" && (!ragConfig?.enabled || !ragModel || ragChecking)) {
+        dispatch({ type: "toast", text: !ragConfig?.enabled ? "RAG 서버 연결 설정을 확인해 주세요." : "사용할 RAG 모델을 선택해 주세요.", tone: "warn" });
+        return;
+      }
+      submitting.current = true;
+      setChatMode(mode);
       if (opts?.answeringId) dispatch({ type: "patchMessage", id: opts.answeringId, patch: { answered: q } });
-      dispatch({ type: "addMessage", message: { id: uid(), role: "user", text: q, at: new Date().toISOString() } });
+      dispatch({ type: "addMessage", message: { id: uid(), role: "user", text: q, at: new Date().toISOString(), mode } });
       dispatch({ type: "busy", busy: true, progress: 0 });
       try {
+        if (mode === "rag") {
+          const controller = new AbortController();
+          ragRequest.current = controller;
+          // 웹 화면의 SUP-/ITM-/PO- 샘플 ID와 선택 문맥은 별도 구매 DB에 전달하지 않는다.
+          const reply = await askRag({ question: q, model: ragModel as RagModel }, { signal: controller.signal });
+          if (!alive.current) return;
+          dispatch({ type: "addMessage", message: {
+            id: uid(), role: "assistant", at: new Date().toISOString(), engine: "rag", text: [reply.answer],
+            ragSources: reply.sources, ragModel: reply.model, ragStatus: reply.status,
+            engineNote: ["별도 구매 DB 기준 · 최종 판단은 담당자", reply.note].filter(Boolean).join(" · "),
+          } });
+          if (!ref.current.state.chatOpen) dispatch({ type: "chat", open: true });
+          return;
+        }
         const reply = await answer(
           q,
           {
@@ -57,8 +132,9 @@ export function AgentProvider({ children }: { children: ReactNode }) {
             pending: state.pending,
           },
           state.aiMode === "llm" ? provider : null,
-          (i) => dispatch({ type: "busy", busy: true, progress: i }),
+          (i) => { if (alive.current) dispatch({ type: "busy", busy: true, progress: i }); },
         );
+        if (!alive.current) return;
         const base = { id: uid(), role: "assistant" as const, at: new Date().toISOString(), engine: reply.engine, engineNote: reply.engineNote, text: reply.text };
         if (reply.type === "analysis") {
           // b 방식: 분석이 끝나면 바로 결과창에 그린다. 후속 질문이면 보던 형식을 유지한다.
@@ -79,15 +155,18 @@ export function AgentProvider({ children }: { children: ReactNode }) {
           if (!ref.current.state.chatOpen) dispatch({ type: "chat", open: true });
         }
       } catch (e) {
+        if (!alive.current || ragRequest.current?.signal.aborted) return;
         dispatch({
           type: "addMessage",
-          message: { id: uid(), role: "assistant", at: new Date().toISOString(), engine: "system", text: [`분석 중 오류가 났습니다: ${(e as Error).message}. 데이터 형식을 확인한 뒤 다시 질문해 주세요.`] },
+          message: { id: uid(), role: "assistant", at: new Date().toISOString(), engine: mode === "rag" ? "rag" : "system", text: [mode === "rag" ? `RAG 요청을 완료하지 못했습니다: ${(e as Error).message}` : `분석 중 오류가 났습니다: ${(e as Error).message}. 데이터 형식을 확인한 뒤 다시 질문해 주세요.`] },
         });
       } finally {
-        dispatch({ type: "busy", busy: false });
+        submitting.current = false;
+        ragRequest.current = null;
+        if (alive.current) dispatch({ type: "busy", busy: false });
       }
     },
-    [provider],
+    [provider, ragConfig, ragModel, ragChecking],
   );
 
   const choose = useCallback((resultId: string, template: TemplateId) => {
@@ -108,7 +187,7 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const value = useMemo(() => ({ ask, choose, rerun, provider, providerChecked: checked }), [ask, choose, rerun, provider, checked]);
+  const value = useMemo(() => ({ ask, choose, rerun, provider, providerChecked: checked, chatMode, setChatMode, ragModel, setRagModel, ragConfig, ragChecking, ragConfigError, refreshRagConfig }), [ask, choose, rerun, provider, checked, chatMode, ragModel, ragConfig, ragChecking, ragConfigError, refreshRagConfig]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
